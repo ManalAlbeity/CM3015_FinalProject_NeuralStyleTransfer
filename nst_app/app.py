@@ -11,7 +11,7 @@ import tensorflow_hub as hub
 from nst_core_tf import run_gatys_tf, pil_to_tensor_01, tensor01_to_pil
 
 st.set_page_config(page_title="Neural Style Transfer (NST) Demo", layout="centered")
-st.title("🎨 Neural Style Transfer Demo")
+st.title("🖌️🖼️ Neural Style Transfer Web App")
 st.caption("Upload content + style, pick a model, and get a stylised image.")
 
 # -----------------------------
