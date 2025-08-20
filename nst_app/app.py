@@ -1,18 +1,28 @@
 # -----------------------------
-# app.py (Mask R-CNN AdaIN ready)
+# app.py (Mask R-CNN AdaIN + Improved Gatys with user-adjustable style strength)
 # -----------------------------
 import streamlit as st
 import numpy as np
 from PIL import Image, UnidentifiedImageError
 import tensorflow as tf
 import tensorflow_hub as hub
+import io
 
 # Local modules
 from nst_core_tf import run_gatys_tf, pil_to_tensor_01, tensor01_to_pil
 
 st.set_page_config(page_title="Neural Style Transfer (NST) Web App", layout="centered")
-st.title("🖌️🖼️ Neural Style Transfer Web App")
+st.title("🖌️Neural Style Transfer Web App")
 st.caption("Upload content + style, pick a model, and get a stylised image.")
+
+# -----------------------------
+# Helper: convert PIL to BytesIO for download
+# -----------------------------
+def pil_to_bytes(pil_img, format="PNG"):
+    buf = io.BytesIO()
+    pil_img.save(buf, format=format)
+    buf.seek(0)
+    return buf
 
 # -----------------------------
 # Sidebar: global settings
@@ -25,8 +35,16 @@ with st.sidebar:
         ["TF-Hub (Fast)", "Gatys (Classic)", "AdaIN (requires weights)"],
         index=0
     )
-    alpha = st.slider("α (content strength)", 0.0, 1.0, 0.5, 0.05)
-    beta  = st.slider("β (style strength)", 0.0, 1.0, 0.8, 0.05)
+
+    if model_choice == "Gatys (Classic)":
+        st.subheader("Gatys Style Options")
+        alpha = st.slider("α (content strength)", 0.0, 1.0, 0.4, 0.05)
+        beta  = st.slider("β (style strength)", 0.0, 2.0, 1.5, 0.05)
+        steps = st.slider("Gatys Steps", 50, 400, 200, 10)
+    else:
+        alpha = st.slider("α (content strength)", 0.0, 1.0, 0.5, 0.05)
+        beta  = st.slider("β (style strength)", 0.0, 1.0, 0.8, 0.05)
+        steps = 120
 
     if model_choice == "AdaIN (requires weights)":
         adain_mode = st.radio("AdaIN Mode", ["Full Image", "Object Only"], index=0)
@@ -74,10 +92,10 @@ if style_file:
 cols = st.columns(2)
 with cols[0]:
     st.markdown("**Content**")
-    if content_pil: st.image(content_pil, use_column_width=True)
+    if content_pil: st.image(content_pil, use_container_width=True)
 with cols[1]:
     st.markdown("**Style**")
-    if style_pil: st.image(style_pil, use_column_width=True)
+    if style_pil: st.image(style_pil, use_container_width=True)
 
 st.markdown("---")
 
@@ -117,22 +135,53 @@ if st.button("✨ Get Stylised Output"):
         blended = (1 - beta) * c + beta * out
         result = tensor01_to_pil(blended)
         st.success("Done with TF-Hub model.")
-        st.image(result, caption="Stylised Result (TF-Hub + blend)", use_column_width=True)
+        st.image(result, caption="Stylised Result (TF-Hub + blend)", use_container_width=True)
+
+        st.download_button(
+            label="⬇️ Download Stylised Image",
+            data=pil_to_bytes(result),
+            file_name="stylised_output.png",
+            mime="image/png"
+        )
 
     # -----------------------------
-    # Gatys Classic
+    # Gatys Classic with improved stylization
     # -----------------------------
     elif model_choice == "Gatys (Classic)":
-        with st.spinner("Running Gatys optimisation (slow on CPU)..."):
+        st.subheader("Gatys Style Transfer (may be slow on CPU)")
+
+        progress_bar = st.progress(0)
+        step_text = st.empty()
+        image_slot = st.empty()
+
+        def update_progress(step, total_steps):
+            progress_bar.progress(step / total_steps)
+            step_text.text(f"Step {step}/{total_steps}")
+
+        def show_intermediate(pil_img, step):
+            image_slot.image(pil_img, caption=f"Step {step}", use_container_width=True)
+
+        with st.spinner("Running Gatys style transfer, please wait..."):
             result = run_gatys_tf(
                 content_small, style_small,
                 content_weight=float(alpha),
                 style_weight=float(beta),
-                steps=120,
-                tv_weight=1e-4
+                steps=steps,
+                tv_weight=5e-5,
+                progress_callback=update_progress,
+                intermediate_callback=show_intermediate,
+                intermediate_every=10
             )
+
         st.success("Done with Gatys.")
-        st.image(result, caption="Stylised Result (Gatys)", use_column_width=True)
+        st.image(result, caption="Stylised Result (Gatys)", use_container_width=True)
+
+        st.download_button(
+            label="⬇️ Download Stylised Image",
+            data=pil_to_bytes(result),
+            file_name="stylised_output_gatys.png",
+            mime="image/png"
+        )
 
     # -----------------------------
     # AdaIN
@@ -151,17 +200,13 @@ if st.button("✨ Get Stylised Output"):
 
         with st.spinner(f"Running AdaIN ({adain_mode})..."):
             if adain_mode == "Object Only":
-                # get mask
                 mask = get_segmentation_mask(content_small, class_id=selected_class_id)
                 mask_img = (mask.squeeze().cpu().numpy() * 255).astype(np.uint8)
                 mask_pil = Image.fromarray(mask_img)
-
-                # resize mask to match content_small
                 mask_pil_resized = mask_pil.resize(content_small.size, Image.NEAREST)
                 mask_img_resized = np.array(mask_pil_resized)
-                st.image(mask_pil_resized, caption=f"Segmentation Mask ({class_name})", use_column_width=True)
+                st.image(mask_pil_resized, caption=f"Segmentation Mask ({class_name})", use_container_width=True)
 
-                # semi-transparent overlay preview
                 overlay = np.array(content_small).copy()
                 red_overlay = np.zeros_like(overlay)
                 red_overlay[..., 0] = 255
@@ -170,9 +215,8 @@ if st.button("✨ Get Stylised Output"):
                                    (overlay*(1-alpha_overlay)+red_overlay*alpha_overlay).astype(np.uint8),
                                    overlay)
                 overlay_pil = Image.fromarray(overlay)
-                st.image(overlay_pil, caption="Mask Overlay Preview", use_column_width=True)
+                st.image(overlay_pil, caption="Mask Overlay Preview", use_container_width=True)
 
-                # stylize only object
                 result = adain_stylize_object_pil(
                     content_small, style_small,
                     alpha=float(beta), size=fixed_size,
@@ -185,8 +229,15 @@ if st.button("✨ Get Stylised Output"):
         caption = f"Stylised Result (AdaIN - {adain_mode}"
         if adain_mode == "Object Only": caption += f", class={class_name}"
         caption += ")"
-        st.image(result, caption=caption, use_column_width=True)
+        st.image(result, caption=caption, use_container_width=True)
+
+        st.download_button(
+            label="⬇️ Download Stylised Image",
+            data=pil_to_bytes(result),
+            file_name="stylised_output.png",
+            mime="image/png"
+        )
 
 st.markdown("---")
 st.caption("Built with Streamlit • TensorFlow • TF-Hub • PyTorch AdaIN + Mask R-CNN segmentation")
-st.caption("Final Deliverable for CM3015 Template: Neural Style Transfer • September 2025")
+st.caption("Final Deliverable for CM3015 Template: Neural Style Transfer • August 2025")
