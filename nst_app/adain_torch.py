@@ -1,5 +1,5 @@
 # -----------------------------
-# adain_torch.py (fixed version)
+# adain_torch.py
 # -----------------------------
 """
 AdaIN inference using PyTorch (backend module only).
@@ -99,7 +99,7 @@ def adain_stylize_pil(content_img: Image.Image, style_img: Image.Image,
     return _to_pil(out)
 
 # -----------------------------
-# COCO segmentation classes (80)
+# COCO segmentation classes (90)
 # -----------------------------
 COCO_CLASSES = {
     1: "person", 2: "bicycle", 3: "car", 4: "motorcycle", 5: "airplane", 6: "bus", 7: "train",
