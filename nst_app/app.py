@@ -10,7 +10,7 @@ import tensorflow_hub as hub
 # Local modules
 from nst_core_tf import run_gatys_tf, pil_to_tensor_01, tensor01_to_pil
 
-st.set_page_config(page_title="Neural Style Transfer (NST) Demo", layout="centered")
+st.set_page_config(page_title="Neural Style Transfer (NST) Web App", layout="centered")
 st.title("🖌️🖼️ Neural Style Transfer Web App")
 st.caption("Upload content + style, pick a model, and get a stylised image.")
 
@@ -189,3 +189,4 @@ if st.button("✨ Get Stylised Output"):
 
 st.markdown("---")
 st.caption("Built with Streamlit • TensorFlow • TF-Hub • PyTorch AdaIN + Mask R-CNN segmentation")
+st.caption("Final Deliverable for CM3015 Template: Neural Style Transfer • September 2025")
