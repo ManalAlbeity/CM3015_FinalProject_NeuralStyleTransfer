@@ -1,6 +1,6 @@
 """
 TensorFlow utilities for Gatys-style optimisation and image conversions.
-Kept small and friendly for Streamlit.
+Supports Streamlit-friendly progress updates with optional intermediate image callback.
 """
 from __future__ import annotations
 import tensorflow as tf
@@ -25,8 +25,6 @@ def tensor01_to_pil(t: tf.Tensor) -> Image.Image:
 # -----------------------------
 # Gatys-style transfer (optimisation on pixels)
 # -----------------------------
-
-# Default VGG layers for style/content
 _STYLE_LAYERS = [
     'block1_conv1',
     'block2_conv1',
@@ -37,7 +35,6 @@ _STYLE_LAYERS = [
 _CONTENT_LAYERS = ['block5_conv2']
 
 def _vgg_layers(layer_names):
-    """Creates a VGG19 model that returns a list of intermediate layer activations."""
     vgg = tf.keras.applications.VGG19(include_top=False, weights='imagenet')
     vgg.trainable = False
     outputs = [vgg.get_layer(name).output for name in layer_names]
@@ -45,59 +42,61 @@ def _vgg_layers(layer_names):
     return model
 
 def _as_list(x):
-    """Ensure x is a list (Keras returns a single Tensor when there's only 1 output)."""
     return x if isinstance(x, (list, tuple)) else [x]
 
 def _gram_matrix(x):
-    """Compute Gram matrix for a 4D tensor [1,H,W,C]."""
     x = tf.squeeze(x, axis=0)            # [H,W,C]
     x = tf.reshape(x, [-1, x.shape[-1]]) # [H*W, C]
     n = tf.cast(tf.shape(x)[0], tf.float32)
-    gram = tf.matmul(x, x, transpose_a=True) / n
-    return gram
+    return tf.matmul(x, x, transpose_a=True) / n
 
-def run_gatys_tf(content_img: Image.Image,
-                 style_img: Image.Image,
-                 content_weight: float = 0.5,
-                 style_weight: float = 0.8,
-                 steps: int = 120,
-                 tv_weight: float = 1e-4) -> Image.Image:
+# -----------------------------
+# Run Gatys with optional callbacks
+# -----------------------------
+def run_gatys_tf(
+    content_img: Image.Image,
+    style_img: Image.Image,
+    content_weight: float = 0.4,    # slightly lower, lets style dominate
+    style_weight: float = 1.5,      # stronger style
+    steps: int = 200,               # more steps for visible effect
+    tv_weight: float = 5e-5,        # lower TV to avoid smoothing out style
+    progress_callback=None,
+    intermediate_callback=None,
+    intermediate_every: int = 10 
+) -> Image.Image:
+
     """
-    Run the classic Gatys optimisation. Returns a PIL image.
-    - content_weight ↔ α
-    - style_weight   ↔ β
-    Note: steps kept moderate for Streamlit CPU. Increase cautiously.
+    Classic Gatys optimisation with optional Streamlit callbacks:
+    - progress_callback(step, total_steps)
+    - intermediate_callback(pil_image, step)
     """
-    # Preprocess to VGG space [0..255] BGR with mean subtraction
+    # Preprocess to VGG space
     def _preprocess_vgg(pil_img):
         img = np.array(pil_img).astype(np.float32)
         img = tf.convert_to_tensor(img)[tf.newaxis, ...]
-        # no-op resize (kept for clarity)
         img = tf.image.resize(img, (pil_img.height, pil_img.width), method='lanczos3')
-        # RGB -> BGR and mean subtraction
         img = tf.reverse(img, axis=[-1])
         mean = tf.constant([103.939, 116.779, 123.68], dtype=tf.float32)
-        img = img - mean
-        return img
+        return img - mean
 
+    # Deprocess back to PIL
     def _deprocess_vgg(t):
         mean = tf.constant([103.939, 116.779, 123.68], dtype=tf.float32)
         x = t + mean
-        x = tf.reverse(x, axis=[-1])  # BGR -> RGB
+        x = tf.reverse(x, axis=[-1])
         x = tf.clip_by_value(x, 0.0, 255.0)
         arr = tf.cast(x[0], tf.uint8).numpy()
         return Image.fromarray(arr)
 
-    # Build models
+    # Models
     style_extractor = _vgg_layers(_STYLE_LAYERS)
     content_extractor = _vgg_layers(_CONTENT_LAYERS)
 
     # Prepare tensors
     c = _preprocess_vgg(content_img)
     s = _preprocess_vgg(style_img)
-    init = tf.Variable(c)  # start from content image
+    init = tf.Variable(c)
 
-    # Extract targets (force list forms)
     style_targets = [_gram_matrix(t) for t in style_extractor(s)]
     content_targets = _as_list(content_extractor(c))
 
@@ -106,32 +105,30 @@ def run_gatys_tf(content_img: Image.Image,
     @tf.function
     def _step(img_var):
         with tf.GradientTape() as tape:
-            # Forward (force list forms)
             s_feats = style_extractor(img_var)
             c_feats = _as_list(content_extractor(img_var))
 
-            # Style loss
-            s_loss = 0.0
-            for sf, st in zip(s_feats, style_targets):
-                gm = _gram_matrix(sf)
-                s_loss += tf.reduce_mean(tf.square(gm - st))
-            s_loss = s_loss / float(len(_STYLE_LAYERS))
-
-            # Content loss (now safe to iterate)
-            diffs = [tf.reduce_mean(tf.square(cf - ct)) for cf, ct in zip(c_feats, content_targets)]
-            c_loss = tf.add_n(diffs) / float(len(_CONTENT_LAYERS))
-
-            # Total variation for smoothness
-            tv = tf.image.total_variation(img_var)
-            loss = style_weight * s_loss + content_weight * c_loss + tv_weight * tf.reduce_mean(tv)
-
+            s_loss = tf.add_n([tf.reduce_mean(tf.square(_gram_matrix(sf) - st)) 
+                               for sf, st in zip(s_feats, style_targets)]) / float(len(_STYLE_LAYERS))
+            c_loss = tf.add_n([tf.reduce_mean(tf.square(cf - ct)) 
+                               for cf, ct in zip(c_feats, content_targets)]) / float(len(_CONTENT_LAYERS))
+            tv = tf.reduce_mean(tf.image.total_variation(img_var))
+            loss = style_weight * s_loss + content_weight * c_loss + tv_weight * tv
         grads = tape.gradient(loss, img_var)
         return loss, grads
 
-    for i in range(int(steps)):
+    # Optimization loop
+    for i in range(steps):
         loss, grads = _step(init)
         opt.apply_gradients([(grads, init)])
-        # Keep values bounded in VGG space
         init.assign(tf.clip_by_value(init, -150.0, 150.0))
+
+        # Progress callback
+        if progress_callback:
+            progress_callback(i + 1, steps)
+
+        # Intermediate image callback
+        if intermediate_callback and ((i + 1) % intermediate_every == 0 or i == steps - 1):
+            intermediate_callback(_deprocess_vgg(init), i + 1)
 
     return _deprocess_vgg(init)
