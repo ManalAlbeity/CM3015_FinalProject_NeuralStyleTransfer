@@ -1,5 +1,5 @@
 # -----------------------------
-# app.py (Mask R-CNN AdaIN + Improved Gatys with user-adjustable style strength)
+# app.py (Mask R-CNN AdaIN + Improved Gatys with multi-object & fallback)
 # -----------------------------
 import streamlit as st
 import numpy as np
@@ -12,7 +12,7 @@ import io
 from nst_core_tf import run_gatys_tf, pil_to_tensor_01, tensor01_to_pil
 
 st.set_page_config(page_title="Neural Style Transfer (NST) Web App", layout="centered")
-st.title("🖌️Neural Style Transfer Web App")
+st.title("🖌️ Neural Style Transfer Web App")
 st.caption("Upload content + style, pick a model, and get a stylised image.")
 
 # -----------------------------
@@ -30,6 +30,7 @@ def pil_to_bytes(pil_img, format="PNG"):
 with st.sidebar:
     st.header("Settings")
     fixed_size = st.slider("Resize all images to (square)", 256, 768, 512, 64)
+
     model_choice = st.selectbox(
         "Model",
         ["TF-Hub (Fast)", "Gatys (Classic)", "AdaIN (requires weights)"],
@@ -42,25 +43,46 @@ with st.sidebar:
         beta  = st.slider("β (style strength)", 0.0, 2.0, 1.5, 0.05)
         steps = st.slider("Gatys Steps", 50, 400, 200, 10)
     else:
+        # For TF-Hub and AdaIN we use α/β as blend / style intensity knobs
         alpha = st.slider("α (content strength)", 0.0, 1.0, 0.5, 0.05)
-        beta  = st.slider("β (style strength)", 0.0, 1.0, 0.8, 0.05)
-        steps = 120
+        beta  = st.slider("β (style strength)",   0.0, 1.0, 0.8, 0.05)
+        steps = 120  # unused outside Gatys
 
+    # AdaIN-specific controls
     if model_choice == "AdaIN (requires weights)":
         adain_mode = st.radio("AdaIN Mode", ["Full Image", "Object Only"], index=0)
+
         if adain_mode == "Object Only":
+            # Import here so users not using AdaIN don't need PyTorch installed
             from adain_torch import COCO_CLASSES
-            class_name = st.selectbox(
-                "Choose object class (COCO dataset)",
+            # Multi-select classes
+            class_names = st.multiselect(
+                "Choose object class(es) (COCO dataset)",
                 options=list(COCO_CLASSES.values()),
-                index=list(COCO_CLASSES.values()).index("dog") if "dog" in COCO_CLASSES.values() else 0
+                default=["dog"] if "dog" in COCO_CLASSES.values() else []
             )
-            selected_class_id = [k for k, v in COCO_CLASSES.items() if v == class_name][0]
+            selected_class_ids = [k for k, v in COCO_CLASSES.items() if v in class_names]
+
+            # Detection controls
+            conf_thresh = st.slider("Mask R-CNN confidence threshold", 0.30, 0.95, 0.50, 0.05)
+            fallback_full = st.checkbox(
+                "Fallback to full-image stylization if no objects found",
+                value=True
+            )
         else:
-            selected_class_id = None
+            selected_class_ids = None
+            conf_thresh = 0.5
+            fallback_full = True
     else:
         adain_mode = None
-        selected_class_id = None
+        selected_class_ids = None
+        conf_thresh = 0.5
+        fallback_full = True
+
+    st.caption(
+        "Tip: TF-Hub blends output with content by β. Gatys uses α/β as loss weights. "
+        "AdaIN uses β as style intensity."
+    )
 
 # -----------------------------
 # Inputs
@@ -71,20 +93,26 @@ content_pil = None
 if use_camera:
     cam_data = st.camera_input("Take a snapshot")
     if cam_data:
-        try: content_pil = Image.open(cam_data).convert("RGB")
-        except UnidentifiedImageError: st.error("Cannot identify the camera image.")
+        try:
+            content_pil = Image.open(cam_data).convert("RGB")
+        except UnidentifiedImageError:
+            st.error("Cannot identify the camera image.")
 else:
     content_file = st.file_uploader("Upload content image (JPG/PNG)", type=["jpg","jpeg","png"])
     if content_file:
-        try: content_pil = Image.open(content_file).convert("RGB")
-        except UnidentifiedImageError: st.error("Cannot identify the uploaded content image.")
+        try:
+            content_pil = Image.open(content_file).convert("RGB")
+        except UnidentifiedImageError:
+            st.error("Cannot identify the uploaded content image.")
 
 st.subheader("2) Provide a **Style** image")
 style_file = st.file_uploader("Upload style image (JPG/PNG)", type=["jpg","jpeg","png"])
 style_pil = None
 if style_file:
-    try: style_pil = Image.open(style_file).convert("RGB")
-    except UnidentifiedImageError: st.error("Cannot identify the uploaded style image.")
+    try:
+        style_pil = Image.open(style_file).convert("RGB")
+    except UnidentifiedImageError:
+        st.error("Cannot identify the uploaded style image.")
 
 # -----------------------------
 # Show previews
@@ -92,10 +120,12 @@ if style_file:
 cols = st.columns(2)
 with cols[0]:
     st.markdown("**Content**")
-    if content_pil: st.image(content_pil, use_container_width=True)
+    if content_pil:
+        st.image(content_pil, use_container_width=True)
 with cols[1]:
     st.markdown("**Style**")
-    if style_pil: st.image(style_pil, use_container_width=True)
+    if style_pil:
+        st.image(style_pil, use_container_width=True)
 
 st.markdown("---")
 
@@ -115,11 +145,12 @@ def resize_square(img: Image.Image, size: int) -> Image.Image:
 # -----------------------------
 # Run button
 # -----------------------------
-if st.button("✨ Get Stylised Output"):
+if st.button("✨ Get Stylised Output", type="primary"):
     if content_pil is None or style_pil is None:
         st.warning("Please provide both a content and a style image first.")
         st.stop()
 
+    # Always resize to the fixed square for computation
     content_small = resize_square(content_pil, fixed_size)
     style_small   = resize_square(style_pil, fixed_size)
 
@@ -134,22 +165,16 @@ if st.button("✨ Get Stylised Output"):
         out = tf.image.resize(out, (c.shape[1], c.shape[2]))
         blended = (1 - beta) * c + beta * out
         result = tensor01_to_pil(blended)
+
         st.success("Done with TF-Hub model.")
         st.image(result, caption="Stylised Result (TF-Hub + blend)", use_container_width=True)
-
-        st.download_button(
-            label="⬇️ Download Stylised Image",
-            data=pil_to_bytes(result),
-            file_name="stylised_output.png",
-            mime="image/png"
-        )
+        st.download_button("⬇️ Download Stylised Image", pil_to_bytes(result), "stylised_output.png", "image/png")
 
     # -----------------------------
-    # Gatys Classic with improved stylization
+    # Gatys Classic (with progress)
     # -----------------------------
     elif model_choice == "Gatys (Classic)":
         st.subheader("Gatys Style Transfer (may be slow on CPU)")
-
         progress_bar = st.progress(0)
         step_text = st.empty()
         image_slot = st.empty()
@@ -175,23 +200,18 @@ if st.button("✨ Get Stylised Output"):
 
         st.success("Done with Gatys.")
         st.image(result, caption="Stylised Result (Gatys)", use_container_width=True)
-
-        st.download_button(
-            label="⬇️ Download Stylised Image",
-            data=pil_to_bytes(result),
-            file_name="stylised_output_gatys.png",
-            mime="image/png"
-        )
+        st.download_button("⬇️ Download Stylised Image", pil_to_bytes(result), "stylised_output_gatys.png", "image/png")
 
     # -----------------------------
-    # AdaIN
+    # AdaIN (PyTorch)
     # -----------------------------
     else:
         from adain_torch import (
             adain_stylize_pil,
             adain_stylize_object_pil,
             get_segmentation_mask,
-            check_adain_weights
+            check_adain_weights,
+            COCO_CLASSES
         )
         ok, msg = check_adain_weights()
         if not ok:
@@ -200,43 +220,69 @@ if st.button("✨ Get Stylised Output"):
 
         with st.spinner(f"Running AdaIN ({adain_mode})..."):
             if adain_mode == "Object Only":
-                mask = get_segmentation_mask(content_small, class_id=selected_class_id)
-                mask_img = (mask.squeeze().cpu().numpy() * 255).astype(np.uint8)
-                mask_pil = Image.fromarray(mask_img)
-                mask_pil_resized = mask_pil.resize(content_small.size, Image.NEAREST)
-                mask_img_resized = np.array(mask_pil_resized)
-                st.image(mask_pil_resized, caption=f"Segmentation Mask ({class_name})", use_container_width=True)
+                if not selected_class_ids:
+                    st.warning("Please choose at least one object class.")
+                    st.stop()
+
+                # Build a combined mask for preview
+                combined_mask = None
+                for cid in selected_class_ids:
+                    m = get_segmentation_mask(content_small, class_id=cid, size=fixed_size, threshold=conf_thresh)
+                    m_np = m.squeeze().detach().cpu().numpy()  # [H,W] in {0,1}
+                    combined_mask = m_np if combined_mask is None else np.maximum(combined_mask, m_np)
+
+                # Show mask + overlay previews
+                mask_vis = (combined_mask * 255).astype(np.uint8)
+                mask_pil = Image.fromarray(mask_vis)
+                st.image(mask_pil, caption=f"Segmentation Mask ({', '.join([COCO_CLASSES[c] for c in selected_class_ids])})", use_container_width=True)
 
                 overlay = np.array(content_small).copy()
-                red_overlay = np.zeros_like(overlay)
-                red_overlay[..., 0] = 255
+                red = np.zeros_like(overlay); red[..., 0] = 255
                 alpha_overlay = 0.5
-                overlay = np.where(mask_img_resized[..., None] > 127,
-                                   (overlay*(1-alpha_overlay)+red_overlay*alpha_overlay).astype(np.uint8),
-                                   overlay)
-                overlay_pil = Image.fromarray(overlay)
-                st.image(overlay_pil, caption="Mask Overlay Preview", use_container_width=True)
-
-                result = adain_stylize_object_pil(
-                    content_small, style_small,
-                    alpha=float(beta), size=fixed_size,
-                    class_id=selected_class_id
+                overlay = np.where(
+                    mask_vis[..., None] > 127,
+                    (overlay * (1 - alpha_overlay) + red * alpha_overlay).astype(np.uint8),
+                    overlay
                 )
+                st.image(Image.fromarray(overlay), caption="Mask Overlay Preview", use_container_width=True)
+
+                # If empty mask and fallback selected → full image stylization
+                if combined_mask.sum() == 0 and fallback_full:
+                    result = adain_stylize_pil(content_small, style_small, alpha=float(beta), size=fixed_size)
+                else:
+                    # Call the new multi-class API; keep backward-compat if user still has old function
+                    try:
+                        result = adain_stylize_object_pil(
+                            content_small, style_small,
+                            alpha=float(beta), size=fixed_size,
+                            class_ids=selected_class_ids
+                        )
+                    except TypeError:
+                        # Old signature: pick the class with the largest mask area
+                        areas = []
+                        for cid in selected_class_ids:
+                            m = get_segmentation_mask(content_small, class_id=cid, size=fixed_size, threshold=conf_thresh)
+                            areas.append((cid, float(m.sum().item())))
+                        best_cid = max(areas, key=lambda x: x[1])[0]
+                        result = adain_stylize_object_pil(
+                            content_small, style_small,
+                            alpha=float(beta), size=fixed_size,
+                            class_id=best_cid
+                        )
             else:
+                # Full-image AdaIN
                 result = adain_stylize_pil(content_small, style_small, alpha=float(beta), size=fixed_size)
 
-        st.success("Done with AdaIN.")
-        caption = f"Stylised Result (AdaIN - {adain_mode}"
-        if adain_mode == "Object Only": caption += f", class={class_name}"
-        caption += ")"
-        st.image(result, caption=caption, use_container_width=True)
+        # Show + download
+        if adain_mode == "Object Only":
+            chosen = ", ".join([COCO_CLASSES[c] for c in selected_class_ids])
+            caption = f"Stylised Result (AdaIN – Object Only: {chosen})"
+        else:
+            caption = "Stylised Result (AdaIN – Full Image)"
 
-        st.download_button(
-            label="⬇️ Download Stylised Image",
-            data=pil_to_bytes(result),
-            file_name="stylised_output.png",
-            mime="image/png"
-        )
+        st.success("Done with AdaIN.")
+        st.image(result, caption=caption, use_container_width=True)
+        st.download_button("⬇️ Download Stylised Image", pil_to_bytes(result), "stylised_output.png", "image/png")
 
 st.markdown("---")
 st.caption("Built with Streamlit • TensorFlow • TF-Hub • PyTorch AdaIN + Mask R-CNN segmentation")
