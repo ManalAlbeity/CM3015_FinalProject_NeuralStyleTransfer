@@ -1,5 +1,5 @@
 # -----------------------------
-# adain_torch.py
+# adain_torch.py (fixed version)
 # -----------------------------
 """
 AdaIN inference using PyTorch (backend module only).
@@ -99,7 +99,7 @@ def adain_stylize_pil(content_img: Image.Image, style_img: Image.Image,
     return _to_pil(out)
 
 # -----------------------------
-# COCO segmentation classes (90)
+# COCO segmentation classes (80)
 # -----------------------------
 COCO_CLASSES = {
     1: "person", 2: "bicycle", 3: "car", 4: "motorcycle", 5: "airplane", 6: "bus", 7: "train",
@@ -147,27 +147,45 @@ def get_segmentation_mask(img: Image.Image, size: int = 512, class_id: int = 1, 
     return mask_resized
 
 # -----------------------------
-# Object-only AdaIN
+# Object-only AdaIN (with fallback + multi-class support)
 # -----------------------------
 @torch.no_grad()
 def adain_stylize_object_pil(content_img: Image.Image, style_img: Image.Image,
                              alpha: float = 1.0, size: int = 512,
-                             class_id: int = 1) -> Image.Image:
+                             class_ids: list[int] | None = None) -> Image.Image:
+    """
+    Apply AdaIN only to objects matching the given COCO class IDs.
+    If no objects are detected, fall back to full-image stylization.
+    Supports multiple class IDs at once.
+    """
     ok, msg = check_adain_weights()
-    if not ok: raise RuntimeError(msg)
+    if not ok:
+        raise RuntimeError(msg)
 
     encoder, decoder = load_adain_models("adain")
     c = _to_tensor(content_img, size)
     s = _to_tensor(style_img, size)
 
-    mask = get_segmentation_mask(content_img, size=size, class_id=class_id).to(_DEVICE)
+    # Aggregate masks from all selected classes
+    if class_ids is None:
+        return adain_stylize_pil(content_img, style_img, alpha=alpha, size=size)
 
+    total_mask = torch.zeros_like(c[:, 0:1, :, :])  # shape [1,1,H,W]
+    for cid in class_ids:
+        mask = get_segmentation_mask(content_img, size=size, class_id=cid).to(_DEVICE)
+        total_mask = torch.maximum(total_mask, mask)
+
+    if total_mask.sum() == 0:
+        print(f"[WARN] No objects detected for classes {class_ids}. Falling back to full image stylization.")
+        return adain_stylize_pil(content_img, style_img, alpha=alpha, size=size)
+
+    # AdaIN stylization
     c_feats = encoder(c)
     s_feats = encoder(s)
     t = adain(c_feats, s_feats)
     t = alpha * t + (1 - alpha) * c_feats
     out = decoder(t)
 
-    # broadcast-safe application
-    out = mask * out + (1 - mask) * c
+    # Apply only inside mask
+    out = total_mask * out + (1 - total_mask) * c
     return _to_pil(out)
