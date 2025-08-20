@@ -26,7 +26,7 @@ The app supports three model options:
 
 2. Install packages:
    ```bash
-   pip install -r requirements.txt
+   pip install -r requirements_app.txt
    ```
 
 3. Run the app:
