@@ -66,6 +66,7 @@ or directly in your environment install:
 ```bash
 pip install tensorflow==2.10.0 torch==2.7.1+cu118 torchvision==0.22.1+cu118 --extra-index-url https://download.pytorch.org/whl/cu118 opencv-python==4.12.0 scikit-image imageio Pillow matplotlib==3.10.5 ipywidgets==8.1.7 numpy==1.26.4 pandas tensorflow-hub==0.16.1 lpips seaborn
 ```
+**Note:** Make sure to change the paths to your folder directory to your own using the find and replace feature.
 
 ## 2. App Environment (CPU-friendly for deployment)
 
