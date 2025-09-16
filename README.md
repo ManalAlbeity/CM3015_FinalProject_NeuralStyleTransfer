@@ -45,8 +45,7 @@ We extended this work by integrating **object detection masks**, enabling **sele
 
 ### Deployment
 - **Notebook:** Runs on GPU workstation or Google Colab.  
-- **App:** Can be deployed via **Streamlit Cloud (free hosting)** or run locally on CPU.
-- 
+- **App:** Runs locally on CPU.
 
 ## Installation
 
